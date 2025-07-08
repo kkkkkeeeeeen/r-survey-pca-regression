@@ -1,0 +1,115 @@
+# 載入必要套件
+install.packages("tidyverse")
+
+library(tidyverse)
+library(readxl)
+library(psych)
+library(car)
+library(readxl)
+library(openxlsx)
+
+# 1. 資料讀取與清理
+file_path <- "C:/Users/USER/Downloads/問卷資料20241219.xlsx"
+data <- read_excel(file_path, sheet = "答案資料匯出")
+
+# 確定類別型和數值型變數
+categorical_vars <- c("LQ1", "LQ2", "LQ3", "LQ4", "LQ6", "LQ8", "LQ9", "LQ10", 
+                      "LQ11-1", "LQ11-2", "LQ11-3", "LQ11-4", "LQ11-5", 
+                      "LQ12-1", "LQ12-2", "LQ12-3", "LQ12-4", "LQ12-5")
+numeric_vars <- setdiff(names(data), categorical_vars)
+
+# 轉換資料為數值型
+data <- data %>%
+  mutate(across(all_of(categorical_vars), ~ as.character(.))) %>% 
+  mutate(across(all_of(numeric_vars), ~ as.numeric(as.character(.))))
+
+# 移除缺失值
+data <- na.omit(data)
+
+# 2. 描述性統計
+# 數值型變數的平均值、中位數、標準差
+numeric_stats <- data %>%
+  select(all_of(numeric_vars)) %>%
+  summarise_all(list(mean = ~ mean(., na.rm = TRUE), 
+                     median = ~ median(., na.rm = TRUE), 
+                     sd = ~ sd(., na.rm = TRUE)))
+
+# 類別型變數的分佈頻率
+categorical_stats <- data %>%
+  select(all_of(categorical_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable, Value) %>%
+  summarise(Frequency = n(), .groups = "drop")
+
+# 3. 匯出結果
+# 創建一個新的工作簿
+wb <- createWorkbook()
+# 數值型統計結果
+addWorksheet(wb, "Numeric_Stats")
+writeData(wb, "Numeric_Stats", numeric_stats)
+# 類別型統計結果
+addWorksheet(wb, "Categorical_Stats")
+writeData(wb, "Categorical_Stats", categorical_stats)
+# 儲存檔案
+saveWorkbook(wb, "data_descriptive_with_categorical.xlsx", overwrite = TRUE)
+
+# 3. 主成分分析 (PCA)
+# 選擇 Q1-3 為 y，其他問題為獨立變數
+pca_data <- data %>% select(-`Q1-3`)  # 排除 y 變數
+# 僅保留數值型資料
+pca_data <- pca_data %>%
+  mutate(across(everything(), ~ as.numeric(as.character(.)), .names = "{col}"))
+pca_data <- pca_data %>%
+  select_if(is.numeric)  
+# 移除包含 NA 的變數
+pca_data <- pca_data %>% select_if(~ sum(is.na(.)) == 0)
+# 執行 PCA
+pca_result <- principal(pca_data, nfactors = ncol(pca_data), rotate = "none")
+summary(pca_result)
+# 3.1 累積解釋變異比例
+explained_variance <- cumsum(pca_result$values) / sum(pca_result$values) * 100
+plot(explained_variance, type = "b", xlab = "Number of Components", 
+     ylab = "Cumulative Explained Variance (%)", 
+     main = "Cumulative Explained Variance")
+abline(h = 80, col = "red", lty = 2)  # Mark 80% explained variance line
+
+# 3.2 Kaiser 準則
+selected_components <- sum(pca_result$values > 1)
+print(paste("Kaiser準則建議保留的主成分數量：", selected_components))
+
+# 3.3 Scree Plot
+plot(pca_result$values, type = "b", xlab = "Number of Components", 
+     ylab = "Eigenvalues", 
+     main = "Scree Plot")
+abline(h = 1, col = "red", lty = 2)  # Mark eigenvalue = 1 line
+
+# 重新選擇主成分數量
+pca_result <- principal(pca_data, nfactors = 10, rotate = "none")
+
+# 查看主成分負載
+print(pca_result, digits = 3, sort = TRUE)
+
+# 繪製主成分負載圖
+fa.diagram(pca_result)
+
+# 取出主成分分數
+pca_scores <- as.data.frame(pca_result$scores)
+
+# 4. 多元線性回歸分析
+# 設定 y 為 Q1-3，即「e-learning 融合 AI 教學可以幫助學生更好地掌握學術知識和技能」
+y <- data$`Q1-3`
+final_data <- cbind(y, pca_scores)  # 將主成分分數與 y 合併
+
+# 建立迴歸模型
+regression_model <- lm(y ~ ., data = final_data)
+
+# 檢查模型摘要
+summary(regression_model)
+
+# 5. 殘差分析與視覺化
+# 殘差圖
+plot(regression_model, which = 1)
+
+# 標準化殘差
+residuals_standardized <- rstandard(regression_model)
+qqPlot(residuals_standardized, main = "QQ Plot")
